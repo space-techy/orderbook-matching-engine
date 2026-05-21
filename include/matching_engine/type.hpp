@@ -15,6 +15,7 @@ namespace me::matching{
     using TradeId = uint64_t;
 
     enum class Status : uint64_t {
+        INPROGRESS,
         Rejected,
         Completed
     };
@@ -39,6 +40,7 @@ namespace me::matching{
         // Rejected
         SC,  // Side change from buy to sell or sell to buy
         QI,  // Tried Quantity Increase
+        QZ,  // Quantity Zero Now allowed
         
         // Cancelled & Modify Orders
         // Rejected

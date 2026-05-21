@@ -1,8 +1,24 @@
 #pragma once
 
-#include "matching-engine/type.hpp"
+#include "matching_engine/type.hpp"
+#include<list>
+#include<cstdint>
+#include<chrono>
 
 namespace me::matching{
+    struct OrderResults;
+    struct Order;
+    struct Trade;
+    struct OrderLocation;
+    struct Message;
+
+
+    struct OrderResults{
+        std::vector<Trade> Trades;
+        std::vector<Order> Orders;
+        MessageCode MessageCode;
+    };
+
 
     struct Order{
         ClientId client_id;
