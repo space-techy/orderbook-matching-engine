@@ -1,4 +1,5 @@
 #include "matching_engine/order_book.hpp"
+#include "matching_engine/helper.hpp"
 
 #include<cstdint>
 #include<chrono>
@@ -10,49 +11,6 @@
 #include<sstream>
 
 namespace me::matching{
-
-    std::string OrderBook::get_message_from_code(MessageCode m){
-        switch (m)
-        {
-        case MessageCode::OC:
-            return "Order Completed";
-        case MessageCode::REST:
-            return "Order Restinig";
-        case MessageCode::FO:
-            return "First Order";
-        case MessageCode::FFO:
-            return "Fully Filled Order";
-        case MessageCode::PFO:
-            return "Partially Filled Order";
-        case MessageCode::SO:
-            return "Self Order not allowed";
-        case MessageCode::SC:
-            return "Side change on order modification not allowed";
-        case MessageCode::QI:
-            return "Quantity Increase on order modification not allowed";
-        case MessageCode::ONF:
-            return "Order Not Found";
-        }
-    }
-
-    void OrderBook::print_order(Order& o) {
-        std::string order_side = (o.side == Side::BUY) ? "BUY" : "SELL";
-        std::string order_type = (o.order_type == OrderType::LIMIT) ? "LIMIT" : (o.order_type == OrderType::MARKET) ? "MARKET" : "IOC";
-        std::string order_status = (o.status == Status::Completed) ? "COMPLETED" : (o.status == Status::Rejected) ? "REJECTED" : "INPROGRESS";
-        std::string order_message_code = get_message_from_code(o.msg_code);
-        std::cout << "  ORDER: client_id=" << o.client_id
-                << " order_id=" << o.order_id
-                << " symbol=" << o.symbol
-                << " side=" << order_side
-                << " qty=" << o.quantity 
-                << " rem_qty=" << o.remaining_quantity
-                << " price=" << o.price
-                << " order_type=" << order_type
-                << " timestamp=" << o.arrival_time.time_since_epoch().count()
-                << " status=" << order_status
-                << " message_code=" << order_message_code
-                << "\n";
-    }
 
     std::pair<bool, MessageCode> OrderBook::add_order(Order& incoming_order){
         Side order_side = incoming_order.side;
@@ -104,14 +62,14 @@ namespace me::matching{
             reference_order.erase(cancel_order_id);
             return {1, order_cpy};
         }
-        Order OrderNotFound;
+        Order OrderNotFound{};
         OrderNotFound.status = Status::Rejected;
         OrderNotFound.msg_code = MessageCode::ONF;
         return {0, OrderNotFound};
     }
 
     std::pair<bool, Order> OrderBook::modify_order(OrderId order_id, ClientId cliend_id, Order& order){
-        Order OrderNotFound;
+        Order OrderNotFound{};
         auto modify_order_id = reference_order.find(order_id);
         if(modify_order_id != reference_order.end() && order.quantity > 0){
             if(modify_order_id->second.iter->remaining_quantity <= order.quantity){
@@ -143,11 +101,11 @@ namespace me::matching{
     }
 
     OrderResults OrderBook::match(Order& incoming_order){
-        OrderResults order_results;
+        OrderResults order_results{};
         Side order_side = incoming_order.side;
         Ticks order_price = incoming_order.price;
-        std::vector<Trade> trades;
-        std::vector<Order> orders;
+        std::vector<Trade> trades{};
+        std::vector<Order> orders{};
         if(order_side == Side::BUY){
             auto best_ask_it = best_ask();
             if(best_ask_it != sells_.end() && best_ask_it->first <= order_price){
@@ -166,7 +124,7 @@ namespace me::matching{
                     if(curr_best->first > order_price)break;
                     // Iterating through all orders for a price
                     for(auto order_book_order = curr_best->second.begin(); order_book_order != curr_best->second.end() && incoming_order.remaining_quantity > 0;){
-                        Trade trade;
+                        Trade trade{};
                         order_book_order->status = Status::Completed;
                         incoming_order.status = Status::Completed;
                         if(incoming_order.remaining_quantity < order_book_order->remaining_quantity){
@@ -248,7 +206,7 @@ namespace me::matching{
                     if(curr_best->first < order_price) break;
                     // Iterating through all orders for a price
                     for(auto order_book_order = curr_best->second.begin(); order_book_order != curr_best->second.end() && incoming_order.remaining_quantity > 0;){
-                        Trade trade;
+                        Trade trade{};
                         order_book_order->status = Status::Completed;
                         incoming_order.status = Status::Completed;
                         if(incoming_order.remaining_quantity < order_book_order->remaining_quantity){

@@ -24,6 +24,7 @@ endif()
 add_library(matching_lib STATIC
     src/order_book.cpp
     src/matching_engine.cpp
+    src/helper.cpp
 )
 
 target_include_directories(matching_lib

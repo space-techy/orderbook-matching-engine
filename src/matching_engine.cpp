@@ -1,4 +1,5 @@
 #include "matching_engine/matching_engine.hpp"
+#include "matching_engine/helper.hpp"
 #include<cstdint>
 #include<chrono>
 #include<list>
@@ -11,7 +12,7 @@
 namespace me::matching{
 
     OrderResults MatchingEngine::process_order(Message& order_message){
-        OrderResults order_results;
+        OrderResults order_results{};
         MessageType message_type = order_message.type;
         OrderBook& order_book = SymbolTable[order_message.symbol];
         Order order_info = make_order_from_message(order_message);
@@ -34,8 +35,7 @@ namespace me::matching{
                 order_info.status = Status::INPROGRESS;
                 order_book.add_order(order_info);
                 std::cout << "In FO : ";
-                OrderBook temp_order;
-                temp_order.print_order(order_info);
+                print_order(order_info);
                 std::cout << "Out\n";
             } else if(order_match.MessageCode == MessageCode::OC && order_match.Trades.size() > 0){
                 if(order_info.remaining_quantity > 0){
@@ -43,8 +43,7 @@ namespace me::matching{
                     order_info.msg_code = MessageCode::REST;
                     order_book.add_order(order_info);
                     std::cout << "In OC : ";
-                    OrderBook temp_order;
-                    temp_order.print_order(order_info);
+                    print_order(order_info);
                     std::cout << "Out\n";
                 }
             }

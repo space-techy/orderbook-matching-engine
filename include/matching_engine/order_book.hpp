@@ -17,8 +17,6 @@ namespace me::matching{
             std::pair<bool, MessageCode> add_order(Order& order);
             std::pair<bool, Order> cancel_order(OrderId order_id, ClientId client_id);
             std::pair<bool, Order> modify_order(OrderId order_id, ClientId cliend_id, Order& order);
-            std::string get_message_from_code(MessageCode m);
-            void print_order(Order& o);
 
             OrderResults match(Order& incoming_order);
 
