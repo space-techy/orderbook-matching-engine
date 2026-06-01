@@ -44,6 +44,5 @@ target_include_directories(matching_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 # Server executable
 add_executable(matching_server
     src/main.cpp
-    # src/server.cpp
 )
 target_link_libraries(matching_server PRIVATE matching_lib Crow::Crow nlohmann_json::nlohmann_json)

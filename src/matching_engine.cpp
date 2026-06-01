@@ -1,5 +1,7 @@
 #include "matching_engine/matching_engine.hpp"
 #include "matching_engine/helper.hpp"
+#include "ThreadSafeQueue.hpp"
+
 #include<cstdint>
 #include<chrono>
 #include<list>
@@ -10,7 +12,50 @@
 #include<sstream>
 
 namespace me::matching{
+    MatchingEngine::~MatchingEngine(){
+        stop();
+    }
 
+    void MatchingEngine::set_output_queue(ThreadSafeQueue<ProcessedResult>* queue){
+        output_queue_ = queue;
+    }
+
+    void MatchingEngine::set_broadcast_queue(ThreadSafeQueue<BroadcastMessage>* queue){
+        broadcast_message_queue = queue;
+    }
+
+    void MatchingEngine::submit(ConnId& conn_id, Message& message){
+        input_queue_.push_order(QueueItem{conn_id, message});
+    }
+
+    void MatchingEngine::start(){
+        running_ = true;
+        worker_ = std::thread(&MatchingEngine::worker_loop, this);
+    }
+
+    void MatchingEngine::stop(){
+        if(!running_) return;
+        running_ = false;
+        input_queue_.stop();
+        if(worker_.joinable()){
+            worker_.join();
+        }
+    }
+
+    void MatchingEngine::worker_loop(){
+        while(running_){
+            auto item = input_queue_.pop_order();
+            if(!item.has_value()){
+                break;
+            }
+
+            OrderResults order_results = process_order(item->message);
+            if(output_queue_){
+                output_queue_->push_order(ProcessedResult{item->conn_id, std::move(order_results)});
+            }
+        }
+    }
+    
     OrderResults MatchingEngine::process_order(Message& order_message){
         OrderResults order_results{};
         MessageType message_type = order_message.type;

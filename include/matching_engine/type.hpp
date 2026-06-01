@@ -11,6 +11,7 @@ namespace me::matching{
     using Ticks = uint64_t;
     using Symbol = uint64_t;
     using Timestamp = std::chrono::system_clock::time_point;
+    using ConnId = uint64_t;
 
     using TradeId = uint64_t;
 

@@ -1,5 +1,6 @@
 #include "matching_engine/matching_engine.hpp"
 #include "matching_engine/helper.hpp"
+#include "ThreadSafeQueue.hpp"
 
 #include<iostream>
 #include<sstream>
@@ -72,7 +73,13 @@ namespace me::matching{
 int main(){
     using namespace me::matching;
 
+    ThreadSafeQueue<ProcessedResult> output_queue_;
+    ThreadSafeQueue<BroadcastMessage> broadcast_message_queue_;
+
     MatchingEngine engine;
+    engine.set_output_queue(&output_queue_);
+    engine.set_broadcast_queue(&broadcast_message_queue_);
+    engine.start();
 
     std::cout << "Matching Engine REPL — type 'help' for commands.\n";
 
@@ -87,8 +94,12 @@ int main(){
 
         Message msg;
         if (!parse_line(line, msg)) continue;
-
-        OrderResults result = engine.process_order(msg);
+        
+        ConnId conn_id = 1;
+        engine.submit(conn_id, msg);
+        auto item = output_queue_.pop_order();
+        if(!item.has_value()) continue;
+        auto result = item->order_results;
         std::cout << "  result message code: " << static_cast<int>(result.MessageCode) << "\n";
         for(auto &i: result.Trades){
             print_trade(i);
@@ -98,9 +109,10 @@ int main(){
             print_order(i);
         }
         std::cout << "\n";
-
     }
-
+    engine.stop();
+    output_queue_.stop();
+    broadcast_message_queue_.stop();
     std::cout << "Bye...\n";
     return 0;
 }
