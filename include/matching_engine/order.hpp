@@ -66,4 +66,9 @@ namespace me::matching{
         Side side;
     };
 
+    struct Error{
+        std::string error;
+        std::string detail;
+    };
+
 }

@@ -50,8 +50,24 @@ namespace me::matching{
             }
 
             OrderResults order_results = process_order(item->message);
+            std::cout << "  result message code: " << static_cast<int>(order_results.MessageCode) << "\n";
+            std::cout << "  Trades : " << "\n";
+            for(auto &i: order_results.Trades){
+                print_trade(i);
+            }
+            std::cout << "\nTrades end " << "\n";
+            std::cout << "  Orders : " << "\n";
+            for(auto &i: order_results.Orders){
+                print_order(i);
+            }
+            std::cout << "\n Orders end " << "\n";
+            std::cout << "\n order results close \n";
+
             if(output_queue_){
-                output_queue_->push_order(ProcessedResult{item->conn_id, std::move(order_results)});
+                output_queue_->push_order(ProcessedResult{item->conn_id, order_results});
+            }
+            if(broadcast_message_queue){
+                broadcast_message_queue->push_order(BroadcastMessage{ order_results.MessageCode, order_results.Trades});
             }
         }
     }
@@ -61,6 +77,7 @@ namespace me::matching{
         MessageType message_type = order_message.type;
         OrderBook& order_book = SymbolTable[order_message.symbol];
         Order order_info = make_order_from_message(order_message);
+        print_order(order_info);
         if(message_type == MessageType::CANCEL){
             std::pair<bool, Order> order_cancel_info = order_book.cancel_order( order_message.order_id, order_message.client_id);
             order_results.Trades = {};

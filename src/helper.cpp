@@ -48,4 +48,12 @@ namespace me::matching{
                 << " message_code=" << order_message_code
                 << "\n";
     }
+
+    void print_trade(const Trade& t) {
+        std::cout << "  TRADE: buyer=" << t.buyer_order_id
+                << " seller=" << t.seller_order_id
+                << " price=" << t.price
+                << " qty=" << t.quantity
+                << " symbol=" << t.symbol << "\n";
+    }
 }

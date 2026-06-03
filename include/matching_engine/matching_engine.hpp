@@ -26,7 +26,8 @@ namespace me::matching{
     };
 
     struct BroadcastMessage{
-        std::string json_data;
+        MessageCode message_code;
+        std::vector<Trade> trades;
     };
 
     class MatchingEngine{
