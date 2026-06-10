@@ -1,10 +1,14 @@
 #pragma once
 
-#include<string>
 #include "matching_engine/order.hpp"
+#include <string>
 
-namespace me::matching{
-    std::string get_message_from_code(MessageCode m);
-    void print_order(Order& o);
+namespace me::matching {
+
+    std::string message_code_name(MessageCode m);
+
+    // Debug printers (used by ME_LOG path).
+    void print_order(const Order& o);
     void print_trade(const Trade& t);
-} // namespace me::matching
+
+}

@@ -1,68 +1,42 @@
 #pragma once
 
-#include<cstdint>
-#include<chrono>
+#include <cstdint>
 
-namespace me::matching{
-    
-    using OrderId = uint64_t;
-    using ClientId = uint64_t;
-    using Quantity = uint64_t;
-    using Ticks = uint64_t;
-    using Symbol = uint64_t;
-    using Timestamp = std::chrono::system_clock::time_point;
-    using ConnId = uint64_t;
+namespace me::matching {
 
-    using TradeId = uint64_t;
+    using OrderId   = uint64_t;
+    using ClientId  = uint64_t;
+    using Qty       = uint64_t;
+    using Ticks     = int64_t;   // signed: lets price-validation reject negatives
+    using Symbol    = uint64_t;
+    using ConnId    = uint64_t;
+    using TradeId   = uint64_t;
+    using SeqNum    = uint64_t;
 
-    enum class Status : uint64_t {
-        INPROGRESS,
-        Rejected,
-        Completed
+    enum class Side : uint8_t {
+        Buy,
+        Sell
     };
 
-    enum class MessageCode : uint64_t {
-        // Order completed
-        OC,
-
-        // Order resting
-        REST,
-
-        // New orders
-        // This are for successful orders
-        FO,  // First Order
-        FFO, // Fully Filled order
-        PFO, // Partiall Filled Order
-        
-        // rejected
-        SO,  // self order, that is same client cannot have best ask and best bid
-
-        // Modify Orders
-        // Rejected
-        SC,  // Side change from buy to sell or sell to buy
-        QI,  // Tried Quantity Increase
-        QZ,  // Quantity Zero Now allowed
-        
-        // Cancelled & Modify Orders
-        // Rejected
-        ONF, // Order Not found
+    enum class OrderType : uint8_t {
+        Limit,
+        Market,
+        Ioc
     };
 
-    enum class Side : uint16_t {
-        BUY,
-        SELL
+    enum class MessageType : uint8_t {
+        NewOrder,
+        Cancel,
+        Modify
     };
 
-    enum class OrderType : uint16_t {
-        LIMIT,
-        MARKET,
-        IOC
-    };
-
-    enum class MessageType : uint16_t {
-        NEW_ORDER,
-        CANCEL,
-        MODIFY
+    enum class MessageCode : uint8_t {
+        OrderFilled    = 0,
+        OrderResting   = 1,
+        OrderCancelled = 2,
+        OrderModified  = 3,
+        PartialFill    = 4,
+        OrderRejected  = 5,
     };
 
 }

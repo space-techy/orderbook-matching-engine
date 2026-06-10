@@ -1,277 +1,227 @@
 #include "matching_engine/order_book.hpp"
-#include "matching_engine/helper.hpp"
 
-#include<cstdint>
-#include<chrono>
-#include<list>
-#include<map>
-#include<utility>
-#include<vector>
-#include<iostream>
-#include<sstream>
+#include <algorithm>
+#include <utility>
 
-namespace me::matching{
+namespace me::matching {
 
-    std::pair<bool, MessageCode> OrderBook::add_order(Order& incoming_order){
-        Side order_side = incoming_order.side;
-        if(order_side == Side::BUY){
-            buys_[incoming_order.price].push_back(incoming_order);
-            std::list<Order>::iterator ref = std::prev(buys_[incoming_order.price].end());
-            reference_order[incoming_order.order_id] = {
-                incoming_order.side,
-                incoming_order.price,
-                ref
+    namespace {
+
+        OrderStatus make_aggressor_status(const Order& o, MessageCode code) {
+            return OrderStatus{
+                o.order_id, o.client_id, o.symbol, o.side,
+                o.price, o.qty, o.remaining_qty, code
             };
-            for(auto &price : buys_){
-                std::cout << " price : " << price.first << " : orders : \n";
-                for(auto &order: price.second){
-                    print_order(order);
-                }
-            }
-            return {1, MessageCode::OC};
-        } else if(order_side == Side::SELL){
-            sells_[incoming_order.price].push_back(incoming_order);
-            std::list<Order>::iterator ref = std::prev(sells_[incoming_order.price].end());
-            reference_order[incoming_order.order_id] = {
-                incoming_order.side,
-                incoming_order.price,
-                ref
-            };
-            for(auto &price : sells_){
-                std::cout << " price : " << price.first << " : orders : \n";
-                for(auto &order: price.second){
-                    print_order(order);
-                }
-            }
-            return {1, MessageCode::OC};
         }
+        
     }
 
-    std::pair<bool, Order> OrderBook::cancel_order(OrderId order_id, ClientId client_id){
-        auto cancel_order_id = reference_order.find(order_id);
-        if(cancel_order_id != reference_order.end() && cancel_order_id->second.iter->client_id == client_id){
-            auto order_info = cancel_order_id->second;
-            Order order_cpy = *cancel_order_id->second.iter;
-            if(order_info.side == Side::BUY){
-                buys_[order_info.price].erase(order_info.iter);
-            } else if(order_info.side == Side::SELL){
-                sells_[order_info.price].erase(order_info.iter);
-            }
-            order_cpy.status = Status::Completed;
-            order_cpy.msg_code = MessageCode::OC;
-            reference_order.erase(cancel_order_id);
-            return {1, order_cpy};
+    OrderResults OrderBook::cancel_order(OrderId order_id, ClientId client_id) {
+        OrderResults r;
+        auto it = reference_order_.find(order_id);
+        if (it == reference_order_.end()) {
+            r.message_code = MessageCode::OrderRejected;
+            r.error = "order not found";
+            r.orders.push_back({order_id, client_id, 0, Side::Buy, 0, 0, 0, MessageCode::OrderRejected});
+            return r;
         }
-        Order OrderNotFound{};
-        OrderNotFound.status = Status::Rejected;
-        OrderNotFound.msg_code = MessageCode::ONF;
-        return {0, OrderNotFound};
-    }
-
-    std::pair<bool, Order> OrderBook::modify_order(OrderId order_id, ClientId cliend_id, Order& order){
-        Order OrderNotFound{};
-        auto modify_order_id = reference_order.find(order_id);
-        if(modify_order_id != reference_order.end() && order.quantity > 0){
-            if(modify_order_id->second.iter->remaining_quantity <= order.quantity){
-                OrderNotFound.status = Status::Rejected;
-                OrderNotFound.msg_code = MessageCode::QI;
-                return {0, OrderNotFound};
-            } else if(modify_order_id->second.iter->side != order.side){
-                OrderNotFound.status = Status::Rejected;
-                OrderNotFound.msg_code = MessageCode::SC;
-                return {0, OrderNotFound};
-            }
-            modify_order_id->second.iter->quantity = order.quantity;
-            modify_order_id->second.iter->remaining_quantity = order.quantity;
-            return {0, *modify_order_id->second.iter};
-        }
-        OrderNotFound.status = Status::Rejected;
-        OrderNotFound.msg_code = (order.quantity == 0) ? MessageCode::QZ : MessageCode::ONF;
-        return {0, OrderNotFound};
-    }
-
-    std::map<Ticks, std::list<Order>, std::greater<>>::iterator OrderBook::best_bid(){
-        auto best_bid_it = buys_.begin();
-        return best_bid_it;
-    }
-
-    std::map<Ticks, std::list<Order>, std::less<>>::iterator OrderBook::best_ask(){
-        auto best_ask_it = sells_.begin();
-        return best_ask_it;
-    }
-
-    OrderResults OrderBook::match(Order& incoming_order){
-        OrderResults order_results{};
-        Side order_side = incoming_order.side;
-        Ticks order_price = incoming_order.price;
-        std::vector<Trade> trades{};
-        std::vector<Order> orders{};
-        if(order_side == Side::BUY){
-            auto best_ask_it = best_ask();
-            if(best_ask_it != sells_.end() && best_ask_it->first <= order_price){
-                for(auto &order_book_order: best_ask_it->second){
-                    if(incoming_order.client_id == order_book_order.client_id){
-                        incoming_order.status = Status::Rejected;
-                        incoming_order.msg_code = MessageCode::SO;
-                        order_results.Trades = trades;
-                        order_results.Orders = {incoming_order};
-                        order_results.MessageCode = MessageCode::SO;
-                        return order_results;
-                    }
-                }
-                while(sells_.size() > 0 && incoming_order.remaining_quantity > 0){
-                    auto curr_best = best_ask();
-                    if(curr_best->first > order_price)break;
-                    // Iterating through all orders for a price
-                    for(auto order_book_order = curr_best->second.begin(); order_book_order != curr_best->second.end() && incoming_order.remaining_quantity > 0;){
-                        Trade trade{};
-                        order_book_order->status = Status::Completed;
-                        incoming_order.status = Status::Completed;
-                        if(incoming_order.remaining_quantity < order_book_order->remaining_quantity){
-                            order_book_order->remaining_quantity -= incoming_order.remaining_quantity;
-                            trade.quantity = incoming_order.remaining_quantity;
-                            incoming_order.remaining_quantity = 0;
-                            order_book_order->msg_code = MessageCode::PFO;
-                            incoming_order.msg_code = MessageCode::FFO;
-                            incoming_order.status = Status::Completed;
-                            order_book_order->status = Status::INPROGRESS;
-                        } else {
-                            incoming_order.remaining_quantity -= order_book_order->remaining_quantity;
-                            trade.quantity = order_book_order->remaining_quantity;
-                            order_book_order->remaining_quantity = 0;
-                            order_book_order->msg_code = MessageCode::FFO;
-                            incoming_order.msg_code = MessageCode::PFO;
-                            incoming_order.status = Status::INPROGRESS;
-                            order_book_order->status = Status::Completed;
-                        }
-                        if(incoming_order.remaining_quantity == 0){
-                            incoming_order.msg_code = MessageCode::FFO;
-                            incoming_order.status = Status::Completed;
-                        }
-                        incoming_order.price = order_book_order->price;
-                        orders.push_back(*order_book_order);
-                        orders.push_back(incoming_order);
-                        
-                        trade.buyer_order_id = incoming_order.order_id;
-                        trade.seller_order_id = order_book_order->order_id;
-                        trade.trade_id = trade.buyer_order_id + trade.seller_order_id;
-                        trade.price = order_book_order->price;
-                        trade.symbol = order_book_order->symbol;
-                        trade.timestamp = std::chrono::system_clock::now();
-                        
-                        trades.push_back(trade);
-                        // auto cpy_order_book_order = order_book_order;
-                        // order_book_order++;
-                        if(order_book_order->remaining_quantity == 0){
-                            reference_order.erase(order_book_order->order_id);
-                            order_book_order = curr_best->second.erase(order_book_order);
-                        } else {
-                            order_book_order++;
-                        }
-                    }
-
-                    // Removing the price
-                    if(curr_best->second.size() == 0){
-                        sells_.erase(curr_best);
-                    }
-                }
-                incoming_order.price = order_price;
-                orders.push_back(incoming_order);
-                order_results.Trades = trades;
-                order_results.Orders = orders;
-                order_results.MessageCode = MessageCode::OC;
-                return order_results;
-            }
-            incoming_order.status = Status::INPROGRESS;
-            incoming_order.msg_code = MessageCode::REST;
-            order_results.Trades = trades;
-            order_results.Orders = {incoming_order};
-            order_results.MessageCode = MessageCode::REST;
-            return order_results;
-        } else if(order_side == Side::SELL){
-            auto best_bid_it = best_bid();
-            if(best_bid_it != buys_.end() && best_bid_it->first >= order_price){
-                for(auto &order_book_order: best_bid_it->second){
-                    if(incoming_order.client_id == order_book_order.client_id){
-                        incoming_order.status = Status::Rejected;
-                        incoming_order.msg_code = MessageCode::SO;
-                        order_results.Trades = trades;
-                        order_results.Orders = {incoming_order};
-                        order_results.MessageCode = MessageCode::SO;
-                        return order_results;
-                    }
-                }
-                while(buys_.size() > 0 && incoming_order.remaining_quantity > 0){
-                    auto curr_best = best_bid();
-                    if(curr_best->first < order_price) break;
-                    // Iterating through all orders for a price
-                    for(auto order_book_order = curr_best->second.begin(); order_book_order != curr_best->second.end() && incoming_order.remaining_quantity > 0;){
-                        Trade trade{};
-                        order_book_order->status = Status::Completed;
-                        incoming_order.status = Status::Completed;
-                        if(incoming_order.remaining_quantity < order_book_order->remaining_quantity){
-                            order_book_order->remaining_quantity -= incoming_order.remaining_quantity;
-                            trade.quantity = incoming_order.remaining_quantity;
-                            incoming_order.remaining_quantity = 0;
-                            order_book_order->msg_code = MessageCode::PFO;
-                            incoming_order.msg_code = MessageCode::FFO;
-                            incoming_order.status = Status::Completed;
-                            order_book_order->status = Status::INPROGRESS;
-                        } else {
-                            incoming_order.remaining_quantity -= order_book_order->remaining_quantity;
-                            trade.quantity = order_book_order->remaining_quantity;
-                            order_book_order->remaining_quantity = 0;
-                            order_book_order->msg_code = MessageCode::FFO;
-                            incoming_order.msg_code = MessageCode::PFO;
-                            incoming_order.status = Status::INPROGRESS;
-                            order_book_order->status = Status::Completed;
-                        }
-                        if(incoming_order.remaining_quantity == 0){
-                            incoming_order.msg_code = MessageCode::FFO;
-                            incoming_order.status = Status::Completed;
-                        }
-                        incoming_order.price = order_book_order->price;
-                        orders.push_back(*order_book_order);
-                        orders.push_back(incoming_order);
-                        
-                        trade.buyer_order_id = incoming_order.order_id;
-                        trade.seller_order_id = order_book_order->order_id;
-                        trade.trade_id = trade.buyer_order_id + trade.seller_order_id;
-                        trade.price = order_book_order->price;
-                        trade.symbol = order_book_order->symbol;
-                        trade.timestamp = std::chrono::system_clock::now();
-                        
-                        trades.push_back(trade);
-                        // auto cpy_order_book_order = order_book_order;
-                        // order_book_order++;
-                        if(order_book_order->remaining_quantity == 0){
-                            reference_order.erase(order_book_order->order_id);
-                            order_book_order = curr_best->second.erase(order_book_order);
-                        } else {
-                            order_book_order++;
-                        }
-                    }
-
-                    // Removing the price
-                    if(curr_best->second.size() == 0){
-                        buys_.erase(curr_best);
-                    }
-                }
-                incoming_order.price = order_price;
-                orders.push_back(incoming_order);
-                order_results.Trades = trades;
-                order_results.Orders = orders;
-                order_results.MessageCode = MessageCode::OC;
-                return order_results;
-            }
-            incoming_order.status = Status::INPROGRESS;
-            incoming_order.msg_code = MessageCode::REST;
-            order_results.Trades = trades;
-            order_results.Orders = {incoming_order};
-            order_results.MessageCode = MessageCode::REST;
-            return order_results;
+        const auto& loc = it->second;
+        if (loc.iter->client_id != client_id) {
+            r.message_code = MessageCode::OrderRejected;
+            r.error = "order not found";
+            r.orders.push_back({order_id, client_id, loc.iter->symbol, loc.iter->side,
+                                loc.iter->price, loc.iter->qty, loc.iter->remaining_qty,
+                                MessageCode::OrderRejected});
+            return r;
         }
 
+        Order snap = *loc.iter;
+        if (loc.side == Side::Buy) {
+            auto level = buys_.find(loc.price);
+            level->second.erase(loc.iter);
+            if (level->second.empty()) buys_.erase(level);
+        } else {
+            auto level = sells_.find(loc.price);
+            level->second.erase(loc.iter);
+            if (level->second.empty()) sells_.erase(level);
+        }
+        reference_order_.erase(it);
+
+        r.message_code = MessageCode::OrderCancelled;
+        r.orders.push_back({snap.order_id, snap.client_id, snap.symbol, snap.side,
+                             snap.price, snap.qty, 0, MessageCode::OrderCancelled});
+        return r;
+    }
+
+    OrderResults OrderBook::modify_order(OrderId order_id, ClientId client_id, Qty new_qty) {
+        OrderResults r;
+
+        if (new_qty == 0) {
+            r.message_code = MessageCode::OrderRejected;
+            r.error = "qty must be > 0";
+            r.orders.push_back({order_id, client_id, 0, Side::Buy, 0, 0, 0, MessageCode::OrderRejected});
+            return r;
+        }
+
+        auto it = reference_order_.find(order_id);
+        if (it == reference_order_.end()) {
+            r.message_code = MessageCode::OrderRejected;
+            r.error = "order not found";
+            r.orders.push_back({order_id, client_id, 0, Side::Buy, 0, 0, 0, MessageCode::OrderRejected});
+            return r;
+        }
+
+        auto& target = *it->second.iter;
+        if (target.client_id != client_id) {
+            r.message_code = MessageCode::OrderRejected;
+            r.error = "order not found";
+            r.orders.push_back({order_id, client_id, target.symbol, target.side,
+                                target.price, target.qty, target.remaining_qty,
+                                MessageCode::OrderRejected});
+            return r;
+        }
+
+        if (new_qty >= target.remaining_qty) {
+            r.message_code = MessageCode::OrderRejected;
+            r.error = "qty increase or no-op not allowed";
+            r.orders.push_back({target.order_id, target.client_id, target.symbol, target.side,
+                                target.price, target.qty, target.remaining_qty,
+                                MessageCode::OrderRejected});
+            return r;
+        }
+
+        target.qty           = new_qty;
+        target.remaining_qty = new_qty;
+
+        r.message_code = MessageCode::OrderModified;
+        r.orders.push_back({target.order_id, target.client_id, target.symbol, target.side,
+                             target.price, target.qty, target.remaining_qty,
+                             MessageCode::OrderModified});
+        return r;
+    }
+
+    OrderResults OrderBook::process_new_order(Order incoming, std::atomic<TradeId>& next_trade_id) {
+        return match_and_rest(std::move(incoming), next_trade_id);
+    }
+
+    OrderResults OrderBook::match_and_rest(Order incoming, std::atomic<TradeId>& next_trade_id) {
+        OrderResults r;
+
+        if (incoming.side == Side::Buy) {
+            while (!sells_.empty() && incoming.remaining_qty > 0) {
+                auto level_it = sells_.begin();
+                if (level_it->first > incoming.price) break;
+
+                auto& list = level_it->second;
+                for (auto it = list.begin(); it != list.end() && incoming.remaining_qty > 0;) {
+                    Order& resting = *it;
+                    const Qty fill_qty = std::min(incoming.remaining_qty, resting.remaining_qty);
+
+                    Trade t{};
+                    t.trade_id         = next_trade_id.fetch_add(1);
+                    t.buyer_order_id   = incoming.order_id;
+                    t.seller_order_id  = resting.order_id;
+                    t.buyer_client_id  = incoming.client_id;
+                    t.seller_client_id = resting.client_id;
+                    t.price            = resting.price;
+                    t.qty              = fill_qty;
+                    t.symbol           = resting.symbol;
+                    t.aggressor_side   = Side::Buy;
+                    r.trades.push_back(t);
+
+                    incoming.remaining_qty -= fill_qty;
+                    resting.remaining_qty  -= fill_qty;
+
+                    const bool resting_done = (resting.remaining_qty == 0);
+
+                    RestingFill rf{};
+                    rf.conn_id = resting.conn_id;
+                    rf.order   = OrderStatus{
+                        resting.order_id, resting.client_id, resting.symbol, resting.side,
+                        resting.price, resting.qty, resting.remaining_qty,
+                        resting_done ? MessageCode::OrderFilled : MessageCode::PartialFill
+                    };
+                    rf.trade = t;
+                    r.resting_events.push_back(rf);
+
+                    if (resting_done) {
+                        reference_order_.erase(resting.order_id);
+                        it = list.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                if (level_it->second.empty()) sells_.erase(level_it);
+            }
+        } else {
+            while (!buys_.empty() && incoming.remaining_qty > 0) {
+                auto level_it = buys_.begin();
+                if (level_it->first < incoming.price) break;
+
+                auto& list = level_it->second;
+                for (auto it = list.begin(); it != list.end() && incoming.remaining_qty > 0;) {
+                    Order& resting = *it;
+                    const Qty fill_qty = std::min(incoming.remaining_qty, resting.remaining_qty);
+
+                    Trade t{};
+                    t.trade_id         = next_trade_id.fetch_add(1);
+                    t.buyer_order_id   = resting.order_id;
+                    t.seller_order_id  = incoming.order_id;
+                    t.buyer_client_id  = resting.client_id;
+                    t.seller_client_id = incoming.client_id;
+                    t.price            = resting.price;
+                    t.qty              = fill_qty;
+                    t.symbol           = resting.symbol;
+                    t.aggressor_side   = Side::Sell;
+                    r.trades.push_back(t);
+
+                    incoming.remaining_qty -= fill_qty;
+                    resting.remaining_qty  -= fill_qty;
+
+                    const bool resting_done = (resting.remaining_qty == 0);
+
+                    RestingFill rf{};
+                    rf.conn_id = resting.conn_id;
+                    rf.order   = OrderStatus{
+                        resting.order_id, resting.client_id, resting.symbol, resting.side,
+                        resting.price, resting.qty, resting.remaining_qty,
+                        resting_done ? MessageCode::OrderFilled : MessageCode::PartialFill
+                    };
+                    rf.trade = t;
+                    r.resting_events.push_back(rf);
+
+                    if (resting_done) {
+                        reference_order_.erase(resting.order_id);
+                        it = list.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                if (level_it->second.empty()) buys_.erase(level_it);
+            }
+        }
+
+        const bool any_trade = !r.trades.empty();
+        if (incoming.remaining_qty == 0) {
+            r.message_code = MessageCode::OrderFilled;
+            r.orders.push_back(make_aggressor_status(incoming, MessageCode::OrderFilled));
+            return r;
+        }
+
+        if (incoming.side == Side::Buy) {
+            buys_[incoming.price].push_back(incoming);
+            auto it = std::prev(buys_[incoming.price].end());
+            reference_order_[incoming.order_id] = {Side::Buy, incoming.price, it};
+        } else {
+            sells_[incoming.price].push_back(incoming);
+            auto it = std::prev(sells_[incoming.price].end());
+            reference_order_[incoming.order_id] = {Side::Sell, incoming.price, it};
+        }
+
+        const MessageCode code = any_trade ? MessageCode::PartialFill : MessageCode::OrderResting;
+        r.message_code = code;
+        r.orders.push_back(make_aggressor_status(incoming, code));
+        return r;
     }
 
 }

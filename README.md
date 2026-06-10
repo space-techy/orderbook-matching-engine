@@ -21,12 +21,13 @@ The code is being written for learning; design choices favor clarity and "does i
 - Accepts JSON order messages over a WebSocket endpoint
 - Maintains a per-symbol limit order book (bids on one side, asks on the other)
 - Matches incoming orders against the opposite side using **price-time priority**
-- Supports `NEW_ORDER`, `CANCEL`, and `MODIFY`
-- Self-trade prevention (an order from client X cannot match against client X's resting orders at the best level)
-- Emits two kinds of output:
-  - **Execution reports** — per-client result of their submitted order
-  - **Trade broadcasts** — fills sent out as a public feed
+- Supports `new_order`, `cancel`, and `modify`
+- Emits three kinds of output, all carrying a `type` discriminator:
+  - **Order response** — sent to the submitting connection: the outcome of their request (filled / resting / cancelled / modified / partial / rejected)
+  - **Resting-fill notice** — sent to a resting order's owner when someone else's aggressive order hits it (same `order_response` shape)
+  - **Trade broadcast** — every fill, sent to all connections as a public market-data feed
 - Single-threaded matching core fed by a thread-safe queue, with separate I/O threads on either side
+- A monotonic `sequence_number` stamped on every order response (one per processed request; all consequences of request *N* share seq *N*)
 
 ---
 
@@ -72,7 +73,7 @@ Each `OrderBook` is one symbol. The book holds:
 
 - `buys_  : std::map<Ticks, std::list<Order>, std::greater<>>` — bids, highest first
 - `sells_ : std::map<Ticks, std::list<Order>, std::less<>>`    — asks, lowest first
-- `reference_order : std::map<OrderId, OrderLocation>` — O(log N) lookup for cancel / modify, where `OrderLocation` holds a `std::list<Order>::iterator` directly into the price-level list
+- `reference_order_ : std::unordered_map<OrderId, OrderLocation>` — O(1) lookup for cancel / modify, where `OrderLocation` holds a `std::list<Order>::iterator` directly into the price-level list
 
 ---
 
@@ -110,6 +111,8 @@ The server listens for WebSocket connections on `/ws`.
 
 JSON over WebSocket. Each client message is one of three operations.
 
+## Client → Engine
+
 ### New order
 
 ```json
@@ -119,10 +122,15 @@ JSON over WebSocket. Each client message is one of three operations.
   "order_id": 1,
   "symbol": 1,
   "side": "buy",
+  "order_type": "limit",
   "price": 100,
   "qty": 10
 }
 ```
+
+- `side`: `"buy"` or `"sell"`.
+- `order_type`: `"limit"`, `"market"`, or `"ioc"`. Optional — defaults to `"limit"`. (Only limit semantics are currently implemented; see [Needs Improvement](#needs-improvement).)
+- `price` must be `> 0`, `qty` must be `> 0`, else the order is rejected.
 
 ### Cancel
 
@@ -147,30 +155,104 @@ JSON over WebSocket. Each client message is one of three operations.
 }
 ```
 
-Only quantity decreases are accepted. A modify with a larger qty is rejected (`QI`). Side changes are rejected (`SC`).
+Only quantity **decreases** are accepted. `qty` must be strictly less than the order's current `remaining_qty`. A modify that increases, leaves qty unchanged, or sets qty to 0 is rejected. The modify keeps the order's time priority (in-place qty reduction).
 
-### Server responses
+---
 
-The server emits two kinds of frames:
+## Engine → Client
 
-1. **Execution report** (to the submitting connection only) — array of `Order` objects reflecting state changes from this request.
-2. **Trade broadcast** (to all connections) — array of `Trade` objects for any fills produced.
+Every order-related frame uses **one envelope shape**, sent only to the relevant connection. A `trade_broadcast` (different shape) goes to all connections. The client distinguishes frames by the top-level `"type"` field.
 
-Both are JSON arrays. There is no top-level envelope or correlation ID in the current version — see [Needs Improvement](#needs-improvement).
+### Order response envelope
+
+```json
+{
+  "type": "order_filled",
+  "sequence_number": 8848,
+  "message_code": 0,
+  "trades": [ /* Trade objects */ ],
+  "orders": [ /* OrderStatus objects */ ],
+  "error": ""
+}
+```
+
+- `type` — human-readable discriminator (varies by outcome, see table below).
+- `sequence_number` — monotonic counter, one per processed request. All frames produced by request *N* (the submitter's response **and** every resting owner's fill notice) carry the same number.
+- `message_code` — the integer outcome code (0–5).
+- `trades` — fills produced (empty if none).
+- `orders` — affected order status rows. For the submitter this is their order's final state; for a resting owner it is their order's updated state.
+- `error` — empty string unless `message_code == 5`, in which case it holds the reason.
+
+**`OrderStatus` object:**
+```json
+{
+  "order_id": 1,
+  "client_id": 1,
+  "symbol": 1,
+  "side": "buy",
+  "price": 100,
+  "qty": 10,
+  "remaining_qty": 0,
+  "message_code": 0
+}
+```
+`price` is always the **limit price as originally requested**. The execution price lives on the `Trade` (it may differ — you can fill at a better price than your limit).
+
+**`Trade` object:**
+```json
+{
+  "buyer_order_id": 1,
+  "seller_order_id": 2,
+  "buyer_client_id": 1,
+  "seller_client_id": 2,
+  "price": 100,
+  "qty": 10,
+  "symbol": 1
+}
+```
+
+### Routing: who gets what
+
+For one `new_order` that sweeps resting orders:
+
+- **The submitter (aggressor)** gets **one** frame: `trades` holds every fill from the sweep; `orders` holds their own final status.
+- **Each resting owner** whose order was hit gets **one frame per order of theirs filled**: `trades` holds the single fill that touched them; `orders` holds that order's new status. These frames arrive unprompted (the owner did not send a request this round). They share the aggressor's `sequence_number`.
+
+A client tells "my request's response" apart from "my resting order got hit" by matching `orders[0].order_id` against its own outstanding-request vs resting-order bookkeeping.
+
+### Trade broadcast (to all connections)
+
+```json
+{
+  "type": "trade_broadcast",
+  "symbol": 1,
+  "price": 100,
+  "qty": 10,
+  "aggressor_side": "buy"
+}
+```
+
+Public market data. One frame per fill. Carries no order IDs or client IDs — private information is never broadcast. No `sequence_number`.
+
+### Parse failure
+
+A frame that fails to parse gets a synchronous reply on the same connection and is **not** submitted to the engine:
+```json
+{ "type": "order_rejected", "error": "parse_failed" }
+```
 
 ### Message codes
 
-| Code | Meaning |
-|---|---|
-| OC  | Order completed (matched / cancelled successfully) |
-| REST | Order resting in book |
-| FO  | First order in the book at this level |
-| FFO | Fully filled order |
-| PFO | Partially filled order |
-| SO  | Self-order rejected |
-| SC  | Modify rejected: side change |
-| QI  | Modify rejected: quantity increase |
-| ONF | Order not found (cancel / modify target missing) |
+| Code | `type` string      | Meaning |
+|------|--------------------|---------|
+| 0    | `order_filled`     | Order fully filled, removed from book |
+| 1    | `order_resting`    | New order accepted, resting in book (no fills) |
+| 2    | `order_cancelled`  | Cancel acknowledged |
+| 3    | `order_modified`   | Modify acknowledged (qty decreased in place) |
+| 4    | `partial_fill`     | Some qty filled; remainder rests (or the resting order is partially consumed) |
+| 5    | `order_rejected`   | Rejected — see `error` field |
+
+**Rejection `error` strings:** `"qty must be > 0"`, `"price must be > 0"`, `"order not found"`, `"qty increase or no-op not allowed"`, `"invalid action"`, `"parse_failed"`.
 
 ---
 
@@ -196,6 +278,8 @@ All matching runs on one worker thread, fed by a mutex-and-condvar queue. This i
 
 Compile-time reflection means no runtime hashing of field names and no `nlohmann::json` dynamic tree. It also means types must opt into `glz::meta` specializations, which is what `include/matching_engine/glaze_meta.hpp` does.
 
+Because Glaze binds one `glz::meta` per C++ type, outbound JSON shapes that differ from the in-memory layout are expressed as small **envelope structs** (`OrderResponseEnvelope`, `TradeBroadcastEnvelope`). The serializer fills an envelope from the internal type, then writes that. This is how the `type` discriminator and the integer `message_code` get onto the wire without polluting the matching-core structs.
+
 ---
 
 ## Project layout
@@ -204,22 +288,21 @@ Compile-time reflection means no runtime hashing of field names and no `nlohmann
 include/
   ThreadSafeQueue.hpp              # mutex + condvar queue
   matching_engine/
-    type.hpp                       # ID / enum aliases
-    order.hpp                      # Order, Trade, OrderResults, OrderLocation, Message
+    type.hpp                       # ID aliases + Side / OrderType / MessageType / MessageCode enums
+    order.hpp                      # Order, Message, Trade, OrderStatus, TradeBroadcast,
+                                   #   OrderLocation, RestingFill, OrderResults, QueueItem, OutputMessage
     order_book.hpp                 # OrderBook class
-    matching_engine.hpp            # MatchingEngine class + queue item types
-    helper.hpp                     # print helpers
-    json_helper.hpp                # parse / serialize via Glaze
-    glaze_meta.hpp                 # Glaze type metadata
+    matching_engine.hpp            # MatchingEngine class + BroadcastBatch alias
+    json_helper.hpp                # parse_message / serialize_order_response / serialize_trade_broadcast
+    glaze_meta.hpp                 # wire envelopes + Glaze type metadata
   server/
     server.hpp                     # start_server entry point
 
 src/
   main.cpp                         # binary entry point, signal handling
   server.cpp                       # Crow WS routes + router threads
-  matching_engine.cpp              # worker loop, process_order, message → order
-  order_book.cpp                   # match, add, cancel, modify
-  helper.cpp                       # print helpers impl
+  matching_engine.cpp              # worker loop, process_order, validation, message → order
+  order_book.cpp                   # match_and_rest, cancel, modify
 
 CMakeLists.txt
 ```
@@ -239,35 +322,28 @@ These are *known* gaps. They are not bugs in the working version — they are th
 ### Type system
 
 - All IDs (`OrderId`, `ClientId`, `Symbol`, …) are aliases for `uint64_t`. The compiler cannot catch argument swaps. Should become **strong typedefs** — one-field structs distinct in the type system but zero-cost at runtime.
-- `MessageCode` mixes three orthogonal concepts (match outcomes, validation rejects, lookup failures). Should split into `MatchOutcome` and `RejectReason`, ideally combined as `std::variant`.
-- Enum underlying types are `uint64_t` where `uint8_t` would do — wasted bytes in hot structs.
 
 ### Struct design
 
-- `Order` has no default member initializers. `Order o;` leaves primitive fields uninitialized — already caused garbage values to leak into output. All POD fields should default-initialize.
-- `Order` carries both the original request (immutable client contract) and live engine state (`remaining_quantity`, `status`, `msg_code`). Production engines split these into a request type and a book-entry type.
-- `Message` is a tagged-union god struct — fields like `side` and `price` are meaningless on a `CANCEL`. Should become `std::variant<NewOrder, Cancel, Modify>`.
+- `Order` and the other POD structs have no default member initializers. `Order o;` leaves primitive fields uninitialized. Every construction site currently sets all fields explicitly, but a default-initializer guard would be safer.
+- `Message` is a tagged-union god struct — fields like `side` and `price` are meaningless on a `cancel`. Should become `std::variant<NewOrder, Cancel, Modify>`.
 
 ### Matching algorithm
 
-- The `match()` function in `order_book.cpp` duplicates the BUY and SELL paths nearly line-for-line. Should be deduplicated by templating on `Side`.
-- Self-trade prevention only checks the **best** price level. A client with orders at non-best levels can still self-trade once the match walks past the best. The check needs to be per-pair during matching, not pre-flight.
-- `MARKET` and `IOC` order types are defined in `OrderType` but not yet handled — current implementation treats every order as `LIMIT`.
-- `MODIFY` does not currently reset price-time priority when it should. Real exchanges reset priority on any price change or qty increase; only pure qty decrease preserves priority.
+- `match_and_rest()` in `order_book.cpp` duplicates the BUY and SELL paths nearly line-for-line. Should be deduplicated by templating on `Side`.
+- **Self-trade prevention is not currently active.** It was prototyped (reject the incoming order if the best opposite level contains the same client) but is presently removed from the matching path. A correct version checks per-pair during the sweep, not just at the best level.
+- `market` and `ioc` order types are defined in `OrderType` and accepted on the wire but not yet handled — the engine treats every order as `limit`.
+- `modify` only supports in-place qty decrease (priority preserved). Price changes and qty increases — which on a real exchange reset time priority via cancel + re-insert — are rejected rather than handled.
 
 ### Transport / protocol
 
-- **No correlation IDs.** Responses arrive as a stream of frames with no link back to the request that triggered them. A bot doing naive request → recv → request cannot reliably correlate. Needs a `request_id` round-tripped from client to response.
-- **Mixed channels.** Per-client execution reports and public trade broadcasts both flow over the same WebSocket. Production exchanges separate these into private and public channels (different endpoints or topic subscriptions).
-- **Empty broadcasts.** The broadcast queue receives a `BroadcastMessage` even when `Trades` is empty (e.g., after a resting or cancel). These should be filtered out at the source.
-- **No envelope.** Frames are raw `[orders]` or `[trades]` arrays with no `type` discriminator. Clients have to inspect structure to tell them apart.
+- **Sequence number, not correlation ID.** Every order response carries a monotonic `sequence_number`, which establishes a canonical processing order. It is *not* a per-request correlation ID echoed from the client — a bot still correlates responses to requests by `order_id`. A round-tripped `request_id` would be more direct.
+- **Mixed channels.** Per-client order responses and public trade broadcasts both flow over the same WebSocket. Production exchanges separate these into private and public channels (different endpoints or topic subscriptions).
 - **Ungraceful shutdown.** Frames queued for a connection that has closed are silently dropped. Should drain pending sends before completing the close.
 
 ### Code quality
 
-- Naming inconsistency across the codebase: `buys_`, `sells_`, `reference_order` (no trailing underscore), `SymbolTable` (PascalCase). Should pick one convention.
-- `print_order` and `get_message_from_code` live in `helper.hpp` (improved from earlier placement on `OrderBook`), but they should ideally be `operator<<` overloads for proper stream integration.
-- Several headers (`json_helper.hpp`, `glaze_meta.hpp`) have not been exercised by every translation unit they're meant to support; IDE-only errors have surfaced that the compiler hasn't yet seen.
+- The struct field types and the `Trade.trade_id` counter exist but `trade_id` is not yet serialized to the wire — it is reserved for the validator. Drop it if the validator ends up not consuming it.
 
 ### Production benchmarks and patterns to study
 
@@ -280,7 +356,3 @@ The references that should guide the next phase:
 - Ulrich Drepper, "What Every Programmer Should Know About Memory"
 
 ---
-
-## License
-
-Not yet specified.

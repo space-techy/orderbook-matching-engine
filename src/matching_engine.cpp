@@ -1,133 +1,106 @@
 #include "matching_engine/matching_engine.hpp"
-#include "matching_engine/helper.hpp"
-#include "ThreadSafeQueue.hpp"
 
-#include<cstdint>
-#include<chrono>
-#include<list>
-#include<map>
-#include<utility>
-#include<vector>
-#include<iostream>
-#include<sstream>
+#include <utility>
 
-namespace me::matching{
-    MatchingEngine::~MatchingEngine(){
+namespace me::matching {
+
+    MatchingEngine::~MatchingEngine() {
         stop();
     }
 
-    void MatchingEngine::set_output_queue(ThreadSafeQueue<ProcessedResult>* queue){
-        output_queue_ = queue;
+    void MatchingEngine::submit(ConnId conn_id, Message msg) {
+        input_queue_.push_order(QueueItem{conn_id, std::move(msg)});
     }
 
-    void MatchingEngine::set_broadcast_queue(ThreadSafeQueue<BroadcastMessage>* queue){
-        broadcast_message_queue = queue;
-    }
-
-    void MatchingEngine::submit(ConnId& conn_id, Message& message){
-        input_queue_.push_order(QueueItem{conn_id, message});
-    }
-
-    void MatchingEngine::start(){
+    void MatchingEngine::start() {
         running_ = true;
-        worker_ = std::thread(&MatchingEngine::worker_loop, this);
+        worker_  = std::thread(&MatchingEngine::worker_loop, this);
     }
 
-    void MatchingEngine::stop(){
-        if(!running_) return;
-        running_ = false;
+    void MatchingEngine::stop() {
+        if (!running_.exchange(false)) return;
         input_queue_.stop();
-        if(worker_.joinable()){
-            worker_.join();
-        }
+        if (worker_.joinable()) worker_.join();
     }
 
-    void MatchingEngine::worker_loop(){
-        while(running_){
+    OrderResults MatchingEngine::make_reject(OrderId order_id, ClientId client_id,
+                                              Symbol symbol, Side side, Ticks price,
+                                              Qty qty, std::string error_text) {
+        OrderResults r;
+        r.message_code = MessageCode::OrderRejected;
+        r.error        = std::move(error_text);
+        r.orders.push_back({order_id, client_id, symbol, side, price, qty, qty,
+                            MessageCode::OrderRejected});
+        return r;
+    }
+
+    OrderResults MatchingEngine::process_order(const Message& msg, ConnId conn_id) {
+        if (msg.type == MessageType::NewOrder || msg.type == MessageType::Modify) {
+            if (msg.qty == 0) {
+                return make_reject(msg.order_id, msg.client_id, msg.symbol, msg.side,
+                                   msg.price, msg.qty, "qty must be > 0");
+            }
+        }
+        if (msg.type == MessageType::NewOrder) {
+            if (msg.price <= 0) {
+                return make_reject(msg.order_id, msg.client_id, msg.symbol, msg.side,
+                                   msg.price, msg.qty, "price must be > 0");
+            }
+        }
+
+        OrderBook& book = symbol_table_[msg.symbol];
+
+        switch (msg.type) {
+            case MessageType::NewOrder: {
+                Order o{
+                    msg.client_id, msg.order_id, msg.symbol, msg.side,
+                    msg.qty, msg.qty, msg.price, msg.order_type, conn_id
+                };
+                return book.process_new_order(std::move(o), next_trade_id_);
+            }
+            case MessageType::Cancel:
+                return book.cancel_order(msg.order_id, msg.client_id);
+
+            case MessageType::Modify:
+                return book.modify_order(msg.order_id, msg.client_id, msg.qty);
+        }
+
+        return make_reject(msg.order_id, msg.client_id, msg.symbol, msg.side,
+                           msg.price, msg.qty, "invalid action");
+    }
+
+    void MatchingEngine::worker_loop() {
+        while (running_) {
             auto item = input_queue_.pop_order();
-            if(!item.has_value()){
-                break;
+            if (!item.has_value()) break;
+
+            OrderResults r = process_order(item->message, item->conn_id);
+            const SeqNum seq = seq_.fetch_add(1) + 1;
+
+            if (broadcast_queue_ && !r.trades.empty()) {
+                BroadcastBatch batch;
+                batch.reserve(r.trades.size());
+                for (const auto& t : r.trades) {
+                    batch.push_back(TradeBroadcast{t.symbol, t.price, t.qty, t.aggressor_side});
+                }
+                broadcast_queue_->push_order(std::move(batch));
             }
 
-            OrderResults order_results = process_order(item->message);
-            std::cout << "  result message code: " << static_cast<int>(order_results.MessageCode) << "\n";
-            std::cout << "  Trades : " << "\n";
-            for(auto &i: order_results.Trades){
-                print_trade(i);
-            }
-            std::cout << "\nTrades end " << "\n";
-            std::cout << "  Orders : " << "\n";
-            for(auto &i: order_results.Orders){
-                print_order(i);
-            }
-            std::cout << "\n Orders end " << "\n";
-            std::cout << "\n order results close \n";
+            auto resting_events = std::move(r.resting_events);
+            r.resting_events.clear();
 
-            if(output_queue_){
-                output_queue_->push_order(ProcessedResult{item->conn_id, order_results});
-            }
-            if(broadcast_message_queue){
-                broadcast_message_queue->push_order(BroadcastMessage{ order_results.MessageCode, order_results.Trades});
-            }
-        }
-    }
-    
-    OrderResults MatchingEngine::process_order(Message& order_message){
-        OrderResults order_results{};
-        MessageType message_type = order_message.type;
-        OrderBook& order_book = SymbolTable[order_message.symbol];
-        Order order_info = make_order_from_message(order_message);
-        print_order(order_info);
-        if(message_type == MessageType::CANCEL){
-            std::pair<bool, Order> order_cancel_info = order_book.cancel_order( order_message.order_id, order_message.client_id);
-            order_results.Trades = {};
-            order_results.Orders = {order_cancel_info.second};
-            order_results.MessageCode = order_cancel_info.second.msg_code;
-            return order_results;
-        } else if(message_type == MessageType::MODIFY){
-            std::pair<bool, Order> order_modify_info = order_book.modify_order(order_message.order_id, order_message.client_id, order_info);
-            order_results.Trades = {};
-            order_results.Orders = {order_modify_info.second};
-            order_results.MessageCode = order_modify_info.second.msg_code;
-            return order_results;
-        } else if(message_type == MessageType::NEW_ORDER){
-            OrderResults order_match = order_book.match(order_info);
-            if(order_match.MessageCode == MessageCode::REST || order_match.MessageCode == MessageCode::FO || (order_match.MessageCode == MessageCode::OC && order_match.Trades.size() == 0)){
-                order_info.msg_code = MessageCode::REST;
-                order_info.status = Status::INPROGRESS;
-                order_book.add_order(order_info);
-                std::cout << "In FO : ";
-                print_order(order_info);
-                std::cout << "Out\n";
-            } else if(order_match.MessageCode == MessageCode::OC && order_match.Trades.size() > 0){
-                if(order_info.remaining_quantity > 0){
-                    order_info.status = Status::INPROGRESS;
-                    order_info.msg_code = MessageCode::REST;
-                    order_book.add_order(order_info);
-                    std::cout << "In OC : ";
-                    print_order(order_info);
-                    std::cout << "Out\n";
+            if (output_queue_) {
+                output_queue_->push_order(OutputMessage{item->conn_id, std::move(r), seq});
+
+                for (auto& ev : resting_events) {
+                    OrderResults sub;
+                    sub.message_code = ev.order.message_code;
+                    sub.orders.push_back(std::move(ev.order));
+                    sub.trades.push_back(std::move(ev.trade));
+                    output_queue_->push_order(OutputMessage{ev.conn_id, std::move(sub), seq});
                 }
             }
-            return order_match;
         }
-    }
-
-    Order MatchingEngine::make_order_from_message(Message& message){
-        Order newOrder = {
-            message.client_id,
-            message.order_id,
-            message.symbol,
-            message.side,
-            message.quantity,
-            message.quantity,
-            message.price,
-            message.order_type,
-            message.arrival_time,
-            Status::INPROGRESS,
-            MessageCode::REST,
-        };
-        return newOrder;
     }
 
 }
