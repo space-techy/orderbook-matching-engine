@@ -4,8 +4,9 @@
 
 namespace me::matching {
 
-    using OrderId   = uint64_t;
-    using ClientId  = uint64_t;
+    using OrderId       = uint64_t;   // engine-internal book id — never chosen by clients
+    using ClientOrderId = uint64_t;   // client's per-REQUEST ticket (FIX calls this ClOrdID)
+    using ClientId      = uint64_t;
     using Qty       = uint64_t;
     using Ticks     = int64_t;   // signed: lets price-validation reject negatives
     using Symbol    = uint64_t;

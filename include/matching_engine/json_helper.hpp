@@ -19,10 +19,19 @@ namespace me::matching {
         return s == Side::Buy ? "buy" : "sell";
     }
 
-    inline std::string serialize_order_response(const OrderResults& r, SeqNum seq) {
+    inline std::string serialize_order_response(const OutputMessage& m) {
+        const OrderResults& r = m.payload;
+        // Every result path emits exactly one status row for the order the
+        // message is about — its internal id and owner ride on the envelope.
+        const OrderId  order_id  = r.orders.empty() ? 0 : r.orders.front().order_id;
+        const ClientId client_id = r.orders.empty() ? 0 : r.orders.front().client_id;
         OrderResponseEnvelope env{
             type_for_code(r.message_code),
-            seq,
+            m.client_order_id,
+            m.orig_client_order_id,
+            order_id,
+            client_id,
+            m.sequence_number,
             static_cast<int>(r.message_code),
             r.trades,
             r.orders,

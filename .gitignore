@@ -1,4 +1,5 @@
 build/
 .vscode
 PROJECT_README.md
-MATCHING_ENGINE_README.md
+MATCHING_ENGINE_README.md.
+.claude/

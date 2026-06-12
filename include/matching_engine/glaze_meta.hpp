@@ -3,6 +3,7 @@
 #include "matching_engine/order.hpp"
 #include <glaze/glaze.hpp>
 #include <glaze/core/meta.hpp>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,10 @@ namespace me::matching {
 
     struct OrderResponseEnvelope {
         std::string              type;
+        std::optional<ClientOrderId>   client_order_id;       // request echo; ABSENT on unsolicited notices
+        std::optional<ClientOrderId>   orig_client_order_id;  // unsolicited only: which order this is about
+        OrderId                  order_id;              // engine-internal book id (0 if never booked)
+        ClientId                 client_id;
         SeqNum                   sequence_number;
         int                      message_code;
         std::vector<Trade>       trades;
@@ -83,14 +88,15 @@ template<>
 struct glz::meta<me::matching::Message> {
     using T = me::matching::Message;
     static constexpr auto value = glz::object(
-        "action",     &T::type,
-        "client_id",  &T::client_id,
-        "order_id",   &T::order_id,
-        "symbol",     &T::symbol,
-        "side",       &T::side,
-        "order_type", &T::order_type,
-        "price",      &T::price,
-        "qty",        &T::qty
+        "action",                 &T::type,
+        "client_id",              &T::client_id,
+        "client_order_id",        &T::client_order_id,
+        "target_client_order_id", &T::target_client_order_id,
+        "symbol",                 &T::symbol,
+        "side",                   &T::side,
+        "order_type",             &T::order_type,
+        "price",                  &T::price,
+        "qty",                    &T::qty
     );
 };
 
@@ -98,13 +104,16 @@ template<>
 struct glz::meta<me::matching::Trade> {
     using T = me::matching::Trade;
     static constexpr auto value = glz::object(
-        "buyer_order_id",   &T::buyer_order_id,
-        "seller_order_id",  &T::seller_order_id,
-        "buyer_client_id",  &T::buyer_client_id,
-        "seller_client_id", &T::seller_client_id,
-        "price",            &T::price,
-        "qty",              &T::qty,
-        "symbol",           &T::symbol
+        "trade_id",               &T::trade_id,
+        "buyer_order_id",         &T::buyer_order_id,
+        "seller_order_id",        &T::seller_order_id,
+        "buyer_client_order_id",  &T::buyer_client_order_id,
+        "seller_client_order_id", &T::seller_client_order_id,
+        "buyer_client_id",        &T::buyer_client_id,
+        "seller_client_id",       &T::seller_client_id,
+        "price",                  &T::price,
+        "qty",                    &T::qty,
+        "symbol",                 &T::symbol
     );
 };
 
@@ -112,14 +121,15 @@ template<>
 struct glz::meta<me::matching::OrderStatus> {
     using T = me::matching::OrderStatus;
     static constexpr auto value = glz::object(
-        "order_id",      &T::order_id,
-        "client_id",     &T::client_id,
-        "symbol",        &T::symbol,
-        "side",          &T::side,
-        "price",         &T::price,
-        "qty",           &T::qty,
-        "remaining_qty", &T::remaining_qty,
-        "message_code",  &T::message_code   // emitted as integer
+        "order_id",        &T::order_id,
+        "client_order_id", &T::client_order_id,
+        "client_id",       &T::client_id,
+        "symbol",          &T::symbol,
+        "side",            &T::side,
+        "price",           &T::price,
+        "qty",             &T::qty,
+        "remaining_qty",   &T::remaining_qty,
+        "message_code",    &T::message_code   // emitted as integer
     );
 };
 
@@ -127,12 +137,16 @@ template<>
 struct glz::meta<me::matching::OrderResponseEnvelope> {
     using T = me::matching::OrderResponseEnvelope;
     static constexpr auto value = glz::object(
-        "type",            &T::type,
-        "sequence_number", &T::sequence_number,
-        "message_code",    &T::message_code,
-        "trades",          &T::trades,
-        "orders",          &T::orders,
-        "error",           &T::error
+        "type",                 &T::type,
+        "client_order_id",      &T::client_order_id,       // omitted when nullopt
+        "orig_client_order_id", &T::orig_client_order_id,  // omitted when nullopt
+        "order_id",             &T::order_id,
+        "client_id",            &T::client_id,
+        "sequence_number",      &T::sequence_number,
+        "message_code",         &T::message_code,
+        "trades",               &T::trades,
+        "orders",               &T::orders,
+        "error",                &T::error
     );
 };
 

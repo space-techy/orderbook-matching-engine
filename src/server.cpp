@@ -48,7 +48,7 @@ namespace me::matching {
             while (true) {
                 auto item = output_queue.pop_order();
                 if (!item.has_value()) break;
-                std::string out = serialize_order_response(item->payload, item->sequence_number);
+                std::string out = serialize_order_response(*item);
                 std::lock_guard lock(conn_mutex);
                 auto it = connections.find(item->conn_id);
                 if (it != connections.end()) {

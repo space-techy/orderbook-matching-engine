@@ -30,7 +30,7 @@ namespace me::matching {
 
             OrderResults process_order(const Message& msg, ConnId conn_id);
 
-            OrderResults make_reject(OrderId order_id, ClientId client_id,
+            OrderResults make_reject(ClientOrderId client_order_id, ClientId client_id,
                                      Symbol symbol, Side side, Ticks price,
                                      Qty qty, std::string error_text);
 
@@ -44,6 +44,12 @@ namespace me::matching {
 
             std::atomic<SeqNum>  seq_{0};
             std::atomic<TradeId> next_trade_id_{1};
+
+            // Engine-private book ids. Plain (non-atomic) on purpose: only the
+            // single worker thread touches it, and a deterministic ++ means a
+            // validator replaying the same message sequence through the same
+            // matching_lib regenerates identical internal ids.
+            OrderId next_order_id_{1};
     };
 
 }

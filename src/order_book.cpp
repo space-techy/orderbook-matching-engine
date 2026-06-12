@@ -1,4 +1,4 @@
-#include "matching_engine/order_book.hpp"
+﻿#include "matching_engine/order_book.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -9,29 +9,46 @@ namespace me::matching {
 
         OrderStatus make_aggressor_status(const Order& o, MessageCode code) {
             return OrderStatus{
-                o.order_id, o.client_id, o.symbol, o.side,
+                o.order_id, o.client_order_id, o.client_id, o.symbol, o.side,
                 o.price, o.qty, o.remaining_qty, code
             };
         }
-        
+
+        // Reject row for a cancel/modify whose target was never found in the
+        // book — no internal id exists, so order_id is 0 and the row names the
+        // order by the client's handle for it.
+        OrderStatus make_not_found_status(ClientOrderId target_client_order_id, ClientId client_id) {
+            return OrderStatus{
+                0, target_client_order_id, client_id, 0, Side::Buy,
+                0, 0, 0, MessageCode::OrderRejected
+            };
+        }
+
     }
 
-    OrderResults OrderBook::cancel_order(OrderId order_id, ClientId client_id) {
+    OrderResults OrderBook::cancel_order(ClientOrderId target_client_order_id, ClientId client_id) {
         OrderResults r;
-        auto it = reference_order_.find(order_id);
+
+        auto map_it = client_order_id_to_internal_.find(target_client_order_id);
+        if (map_it == client_order_id_to_internal_.end()) {
+            r.message_code = MessageCode::OrderRejected;
+            r.error = "order not found";
+            r.orders.push_back(make_not_found_status(target_client_order_id, client_id));
+            return r;
+        }
+
+        auto it = reference_order_.find(map_it->second);
         if (it == reference_order_.end()) {
             r.message_code = MessageCode::OrderRejected;
             r.error = "order not found";
-            r.orders.push_back({order_id, client_id, 0, Side::Buy, 0, 0, 0, MessageCode::OrderRejected});
+            r.orders.push_back(make_not_found_status(target_client_order_id, client_id));
             return r;
         }
         const auto& loc = it->second;
         if (loc.iter->client_id != client_id) {
             r.message_code = MessageCode::OrderRejected;
             r.error = "order not found";
-            r.orders.push_back({order_id, client_id, loc.iter->symbol, loc.iter->side,
-                                loc.iter->price, loc.iter->qty, loc.iter->remaining_qty,
-                                MessageCode::OrderRejected});
+            r.orders.push_back(make_not_found_status(target_client_order_id, client_id));
             return r;
         }
 
@@ -46,28 +63,38 @@ namespace me::matching {
             if (level->second.empty()) sells_.erase(level);
         }
         reference_order_.erase(it);
+        client_order_id_to_internal_.erase(map_it);
 
         r.message_code = MessageCode::OrderCancelled;
-        r.orders.push_back({snap.order_id, snap.client_id, snap.symbol, snap.side,
-                             snap.price, snap.qty, 0, MessageCode::OrderCancelled});
+        r.orders.push_back({snap.order_id, snap.client_order_id, snap.client_id,
+                            snap.symbol, snap.side, snap.price, snap.qty, 0,
+                            MessageCode::OrderCancelled});
         return r;
     }
 
-    OrderResults OrderBook::modify_order(OrderId order_id, ClientId client_id, Qty new_qty) {
+    OrderResults OrderBook::modify_order(ClientOrderId target_client_order_id, ClientId client_id, Qty new_qty) {
         OrderResults r;
 
         if (new_qty == 0) {
             r.message_code = MessageCode::OrderRejected;
             r.error = "qty must be > 0";
-            r.orders.push_back({order_id, client_id, 0, Side::Buy, 0, 0, 0, MessageCode::OrderRejected});
+            r.orders.push_back(make_not_found_status(target_client_order_id, client_id));
             return r;
         }
 
-        auto it = reference_order_.find(order_id);
+        auto map_it = client_order_id_to_internal_.find(target_client_order_id);
+        if (map_it == client_order_id_to_internal_.end()) {
+            r.message_code = MessageCode::OrderRejected;
+            r.error = "order not found";
+            r.orders.push_back(make_not_found_status(target_client_order_id, client_id));
+            return r;
+        }
+
+        auto it = reference_order_.find(map_it->second);
         if (it == reference_order_.end()) {
             r.message_code = MessageCode::OrderRejected;
             r.error = "order not found";
-            r.orders.push_back({order_id, client_id, 0, Side::Buy, 0, 0, 0, MessageCode::OrderRejected});
+            r.orders.push_back(make_not_found_status(target_client_order_id, client_id));
             return r;
         }
 
@@ -75,18 +102,16 @@ namespace me::matching {
         if (target.client_id != client_id) {
             r.message_code = MessageCode::OrderRejected;
             r.error = "order not found";
-            r.orders.push_back({order_id, client_id, target.symbol, target.side,
-                                target.price, target.qty, target.remaining_qty,
-                                MessageCode::OrderRejected});
+            r.orders.push_back(make_not_found_status(target_client_order_id, client_id));
             return r;
         }
 
         if (new_qty >= target.remaining_qty) {
             r.message_code = MessageCode::OrderRejected;
             r.error = "qty increase or no-op not allowed";
-            r.orders.push_back({target.order_id, target.client_id, target.symbol, target.side,
-                                target.price, target.qty, target.remaining_qty,
-                                MessageCode::OrderRejected});
+            r.orders.push_back({target.order_id, target.client_order_id, target.client_id,
+                                target.symbol, target.side, target.price, target.qty,
+                                target.remaining_qty, MessageCode::OrderRejected});
             return r;
         }
 
@@ -94,9 +119,9 @@ namespace me::matching {
         target.remaining_qty = new_qty;
 
         r.message_code = MessageCode::OrderModified;
-        r.orders.push_back({target.order_id, target.client_id, target.symbol, target.side,
-                             target.price, target.qty, target.remaining_qty,
-                             MessageCode::OrderModified});
+        r.orders.push_back({target.order_id, target.client_order_id, target.client_id,
+                            target.symbol, target.side, target.price, target.qty,
+                            target.remaining_qty, MessageCode::OrderModified});
         return r;
     }
 
@@ -118,15 +143,17 @@ namespace me::matching {
                     const Qty fill_qty = std::min(incoming.remaining_qty, resting.remaining_qty);
 
                     Trade t{};
-                    t.trade_id         = next_trade_id.fetch_add(1);
-                    t.buyer_order_id   = incoming.order_id;
-                    t.seller_order_id  = resting.order_id;
-                    t.buyer_client_id  = incoming.client_id;
-                    t.seller_client_id = resting.client_id;
-                    t.price            = resting.price;
-                    t.qty              = fill_qty;
-                    t.symbol           = resting.symbol;
-                    t.aggressor_side   = Side::Buy;
+                    t.trade_id               = next_trade_id.fetch_add(1);
+                    t.buyer_order_id         = incoming.order_id;
+                    t.seller_order_id        = resting.order_id;
+                    t.buyer_client_order_id  = incoming.client_order_id;
+                    t.seller_client_order_id = resting.client_order_id;
+                    t.buyer_client_id        = incoming.client_id;
+                    t.seller_client_id       = resting.client_id;
+                    t.price                  = resting.price;
+                    t.qty                    = fill_qty;
+                    t.symbol                 = resting.symbol;
+                    t.aggressor_side         = Side::Buy;
                     r.trades.push_back(t);
 
                     incoming.remaining_qty -= fill_qty;
@@ -137,14 +164,16 @@ namespace me::matching {
                     RestingFill rf{};
                     rf.conn_id = resting.conn_id;
                     rf.order   = OrderStatus{
-                        resting.order_id, resting.client_id, resting.symbol, resting.side,
-                        resting.price, resting.qty, resting.remaining_qty,
+                        resting.order_id, resting.client_order_id, resting.client_id,
+                        resting.symbol, resting.side, resting.price, resting.qty,
+                        resting.remaining_qty,
                         resting_done ? MessageCode::OrderFilled : MessageCode::PartialFill
                     };
                     rf.trade = t;
                     r.resting_events.push_back(rf);
 
                     if (resting_done) {
+                        client_order_id_to_internal_.erase(resting.client_order_id);
                         reference_order_.erase(resting.order_id);
                         it = list.erase(it);
                     } else {
@@ -164,15 +193,17 @@ namespace me::matching {
                     const Qty fill_qty = std::min(incoming.remaining_qty, resting.remaining_qty);
 
                     Trade t{};
-                    t.trade_id         = next_trade_id.fetch_add(1);
-                    t.buyer_order_id   = resting.order_id;
-                    t.seller_order_id  = incoming.order_id;
-                    t.buyer_client_id  = resting.client_id;
-                    t.seller_client_id = incoming.client_id;
-                    t.price            = resting.price;
-                    t.qty              = fill_qty;
-                    t.symbol           = resting.symbol;
-                    t.aggressor_side   = Side::Sell;
+                    t.trade_id               = next_trade_id.fetch_add(1);
+                    t.buyer_order_id         = resting.order_id;
+                    t.seller_order_id        = incoming.order_id;
+                    t.buyer_client_order_id  = resting.client_order_id;
+                    t.seller_client_order_id = incoming.client_order_id;
+                    t.buyer_client_id        = resting.client_id;
+                    t.seller_client_id       = incoming.client_id;
+                    t.price                  = resting.price;
+                    t.qty                    = fill_qty;
+                    t.symbol                 = resting.symbol;
+                    t.aggressor_side         = Side::Sell;
                     r.trades.push_back(t);
 
                     incoming.remaining_qty -= fill_qty;
@@ -183,14 +214,16 @@ namespace me::matching {
                     RestingFill rf{};
                     rf.conn_id = resting.conn_id;
                     rf.order   = OrderStatus{
-                        resting.order_id, resting.client_id, resting.symbol, resting.side,
-                        resting.price, resting.qty, resting.remaining_qty,
+                        resting.order_id, resting.client_order_id, resting.client_id,
+                        resting.symbol, resting.side, resting.price, resting.qty,
+                        resting.remaining_qty,
                         resting_done ? MessageCode::OrderFilled : MessageCode::PartialFill
                     };
                     rf.trade = t;
                     r.resting_events.push_back(rf);
 
                     if (resting_done) {
+                        client_order_id_to_internal_.erase(resting.client_order_id);
                         reference_order_.erase(resting.order_id);
                         it = list.erase(it);
                     } else {
@@ -208,6 +241,8 @@ namespace me::matching {
             return r;
         }
 
+        // Order rests — register it under BOTH names: the engine's internal id
+        // (reference_order_) and the client's handle (client_order_id_to_internal_).
         if (incoming.side == Side::Buy) {
             buys_[incoming.price].push_back(incoming);
             auto it = std::prev(buys_[incoming.price].end());
@@ -217,6 +252,7 @@ namespace me::matching {
             auto it = std::prev(sells_[incoming.price].end());
             reference_order_[incoming.order_id] = {Side::Sell, incoming.price, it};
         }
+        client_order_id_to_internal_[incoming.client_order_id] = incoming.order_id;
 
         const MessageCode code = any_trade ? MessageCode::PartialFill : MessageCode::OrderResting;
         r.message_code = code;
