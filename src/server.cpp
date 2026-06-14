@@ -22,6 +22,10 @@ namespace me::matching {
 
         crow::SimpleApp app;
 
+        CROW_ROUTE(app, "/health")([]() {
+            return crow::response(200, R"({"status":"ok"})");
+        });
+
         CROW_WEBSOCKET_ROUTE(app, "/ws")
             .onopen([&](crow::websocket::connection& conn) {
                 const ConnId id = next_conn_id.fetch_add(1);
