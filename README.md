@@ -2,6 +2,12 @@
 
 A limit order-book matching engine in modern C++ with a WebSocket front-end.
 
+> **Part of the [Quant-Force](https://github.com/space-techy/quant-force-infra)
+> platform** — the reference / sample engine contestants can study. The
+> **authoritative wire contract** is `docs/ENGINE_SPEC.md` in the platform repo;
+> the protocol below uses the current field names (`client_order_id` /
+> `target_client_order_id`).
+
 Submission unit for a "Codeforces for quants" platform where competitors submit matching engines and quant strategies. This repository is *one such engine*.
 
 ---
@@ -119,7 +125,8 @@ JSON over WebSocket. Each client message is one of three operations.
 {
   "action": "new_order",
   "client_id": 1,
-  "order_id": 1,
+  "client_order_id": 100042,
+  "target_client_order_id": 0,
   "symbol": 1,
   "side": "buy",
   "order_type": "limit",
@@ -138,7 +145,8 @@ JSON over WebSocket. Each client message is one of three operations.
 {
   "action": "cancel",
   "client_id": 1,
-  "order_id": 1,
+  "client_order_id": 100043,
+  "target_client_order_id": 100042,
   "symbol": 1
 }
 ```
@@ -149,7 +157,8 @@ JSON over WebSocket. Each client message is one of three operations.
 {
   "action": "modify",
   "client_id": 1,
-  "order_id": 1,
+  "client_order_id": 100044,
+  "target_client_order_id": 100042,
   "symbol": 1,
   "qty": 5
 }
